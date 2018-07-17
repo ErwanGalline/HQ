@@ -7,7 +7,7 @@ from lieu.input import GeoJSONParser, GeoJSONLineParser
 log = logging.getLogger(__name__)
 
 
-class Matcher(object):
+class Metrics(object):
 
     def __init__(self, file, geojson_1, geojson_2, threshold, distance_threshold=200):
         self.input = file
@@ -32,7 +32,7 @@ class Matcher(object):
 
     def analyseFeature(self):
         file = self.open_geojson_file(self.input)
-        print(":::Feature analyse start")
+        print(":::Feature analyse :")
         it = 0
         true_pos = 0
         false_pos = 0
@@ -71,7 +71,7 @@ class Matcher(object):
         print("Precision :" + str(precision * 100) + " %")
         recall = ((float(true_pos) / (float(true_pos) + ((self.data_set_size) - (float(true_pos) + float(false_pos))))))
         print("Recall :" + str(recall * 100) + " %")
-        print("Same as :" + str(same_as))
+        print("'Same as' occurrence :" + str(same_as))
 
     def verifySimilarity(self, item, dupeList):
         truePos = 0
@@ -87,21 +87,34 @@ class Matcher(object):
 
             if potentialDupe["similarity"] > self.threshold and self.distance(p1, p2) < self.distance_threshold:
                 if self.findRef(item, potentialDupe):
+                    # print("------------------------------")
+                    # print("DUP FOUND : ")
+                    # print("Score ::: " + str(potentialDupe["similarity"]))
+                    # print("Distance :" + str(dist) + " meters")
+                    #
+                    # if not item["reference"]["bind_id"]:
+                    #     print("Item name (id=" + item["reference"]["id"] + ") ::" + item['properties']['name'])
+                    #     print("Dupe name (id=" + potentialDupe["object"]["reference"]["bind_id"] + ") ::" +
+                    #           potentialDupe['object']['properties']['name'])
+                    # else:
+                    #     print("Item name (id=" + item["reference"]["bind_id"] + ") ::" + item['properties']['name'])
+                    #     print("Dupe name (id=" + potentialDupe["object"]["reference"]["id"] + ") ::" +
+                    #           potentialDupe['object']['properties']['name'])
                     truePos += 1
                     real_dupe_list.append(potentialDupe)
                 else:
                     print("------------------------------")
-                    print("DUP ERROR : ")
+                    print("ERROR DUP : ")
                     print("Score ::: " + str(potentialDupe["similarity"]))
                     print("Distance :" + str(dist) + " meters")
 
                     if not item["reference"]["bind_id"]:
                         print("Item name (id=" + item["reference"]["id"] + ") ::" + item['properties']['name'])
-                        print("False dupe name (id=" + potentialDupe["object"]["reference"]["bind_id"] + ") ::" +
+                        print("Dupe name (id=" + potentialDupe["object"]["reference"]["bind_id"] + ") ::" +
                               potentialDupe['object']['properties']['name'])
                     else:
                         print("Item name (id=" + item["reference"]["bind_id"] + ") ::" + item['properties']['name'])
-                        print("False dupe name (id=" + potentialDupe["object"]["reference"]["id"] + ") ::" +
+                        print("Dupe name (id=" + potentialDupe["object"]["reference"]["id"] + ") ::" +
                               potentialDupe['object']['properties']['name'])
                     falsePos += 1
                     fake_dupe_list.append(potentialDupe)

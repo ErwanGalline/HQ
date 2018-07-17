@@ -91,9 +91,8 @@ class Parser(object):
                     geojson['features'].append(feature)
                     i += 1
 
-                    # if limit is not null means we are doing evaluation (test on limited amount of item )
-                    if ((self.item_limit is not None) and (i >= self.item_limit)) or (
-                            (self.bind_list is not None) and (i >= len(self.bind_list))):
+                    # if limit is not null means we are doing evaluation ( == test on a limited amount of item )
+                    if ((self.item_limit is not None) and (i >= self.item_limit)) :
                         break
 
                 except KeyError:
