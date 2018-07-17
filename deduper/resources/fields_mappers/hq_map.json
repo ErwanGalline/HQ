@@ -1,0 +1,15 @@
+{
+  "id" : "hq",
+  "columns" :
+  {
+    "lon":"longitude",
+    "lat":"latitude",
+    "name" :"hotel_name",
+    "country":"country_name",
+    "zip_code":"postcode",
+    "address":"address_english",
+    "city":"city_name",
+    "ref_id":"hq_hotel_id",
+    "bind_id":"expedia_id"
+  }
+}

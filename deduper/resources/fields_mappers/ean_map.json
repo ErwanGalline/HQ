@@ -1,0 +1,16 @@
+{
+  "id" : "ean",
+  "delimiter" : "|",
+  "columns" :
+  {
+    "lon":"Lng",
+    "lat":"Lat",
+    "name" :"EANHotelName",
+    "country":"EANCountry",
+    "zip_code":"EANZipCode",
+    "address":"Address",
+    "city":"EANCity",
+    "ref_id":"EANKey",
+    "bind_id":"SourceKey"
+  }
+}

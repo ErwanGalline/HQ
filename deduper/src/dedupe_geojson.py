@@ -1,0 +1,458 @@
+import os
+import stat
+
+import argparse
+import leveldb
+import operator
+import os
+import six
+import subprocess
+import uuid
+
+from six import itertools, operator
+
+import ujson as json
+from collections import OrderedDict, defaultdict
+
+from lieu.address import Address, AddressComponents, Coordinates
+from lieu.api import DedupeResponse
+from lieu.dedupe import NameAddressDeduper, AddressDeduper, Name
+from lieu.encoding import safe_encode, safe_decode
+from lieu.information_gain import InformationGainBuilder
+from lieu.tfidf import TFIDF
+from lieu.input import GeoJSONParser, GeoJSONLineParser
+from lieu.word_index import WordIndex
+
+from postal.dedupe import duplicate_status
+
+
+def open_geojson_file(filename):
+    try:
+        f = GeoJSONLineParser(filename)
+        f.next_feature()
+        f = GeoJSONLineParser(filename)
+    except ValueError:
+        f = GeoJSONParser(filename)
+
+    return f
+
+
+def db_key(feature_id):
+    return six.text_type(feature_id).zfill(15)
+
+
+def value_guid(value):
+    return value['properties'].get(DedupeResponse.guid_key)
+
+
+def id_features(filenames):
+    feature_id = 0
+    for filename in filenames:
+        f = open_geojson_file(filename)
+
+        for feature in f:
+            yield feature_id, feature
+            feature_id += 1
+
+
+def dupe_response(feature_id, value, dupe_pairs, features_db, dupes):
+    value = json.loads(value)
+    is_dupe = any((status in (duplicate_status.EXACT_DUPLICATE, duplicate_status.LIKELY_DUPLICATE) for other_id, (status, sim) in dupe_pairs.get(feature_id, {}).items()))
+    if not is_dupe:
+        guid = value_guid(value)
+        DedupeResponse.add_guid(value, guid)
+    response = DedupeResponse.base_response(value, is_dupe)
+
+    if feature_id in dupe_pairs:
+        for other_id, (status, sim) in sorted(dupe_pairs[feature_id].items(), key=operator.itemgetter(1), reverse=True):
+            other_value = json.loads(features_db.Get(db_key(other_id)))
+
+            is_canonical = other_id not in dupes
+
+            classification = DedupeResponse.string_dupe_class(status)
+
+            if is_canonical:
+                other_guid = value_guid(other_value)
+                DedupeResponse.add_guid(other_value, other_guid)
+
+            DedupeResponse.add_possible_dupe(response, value=other_value, classification=classification, is_canonical=is_canonical, similarity=sim, explain=explain)
+    return response
+
+
+def db_get_address(features_db, feature_id):
+    result = features_db.Get(db_key(feature_id))
+    if result:
+        return Address.from_geojson(json.loads(result))
+    else:
+        return None
+
+
+def is_address_dupe(canonical, other, dupe_pairs, dupes, with_unit=False, fuzzy_street_names=False):
+    address_languages = AddressDeduper.combined_place_languages(canonical, other)
+    dupe_class, sim = AddressDeduper.address_dupe_status(canonical, other, languages=address_languages, fuzzy_street_name=fuzzy_street_names)
+    if dupe_class in (duplicate_status.EXACT_DUPLICATE, duplicate_status.LIKELY_DUPLICATE) and (not with_unit or AddressDeduper.is_sub_building_dupe(canonical, other, languages=address_languages)):
+        dupe_pairs[other_id][canonical_id] = (dupe_class, sim)
+        dupes[other_id] = max((dupe_class, sim), dupes.get(other_id, (duplicate_status.NON_DUPLICATE, 0.0)))
+        return True
+    return False
+
+
+def is_name_address_dupe(canoncal, other, dupe_pairs, dupes, word_index=None,
+                         name_dupe_threshold=DedupeResponse.default_name_dupe_threshold,
+                         needs_review_threshold=DedupeResponse.default_name_review_threshold,
+                         with_address=True,
+                         with_unit=False,
+                         use_phone_number=False,
+                         fuzzy_street_names=False):
+    if not address_only:
+        dupe_class, sim = NameAddressDeduper.dupe_class_and_sim(canonical, other, word_index=word_index,
+                                                                likely_dupe_threshold=name_dupe_threshold,
+                                                                needs_review_threshold=name_review_threshold,
+                                                                with_address=with_address,
+                                                                with_unit=with_unit,
+                                                                with_phone_number=use_phone_number,
+                                                                fuzzy_street_name=fuzzy_street_names)
+
+        if dupe_class is not None:
+            if canonical_id in dupe_pairs[other_id]:
+                existing_dupe_class, existing_sim = dupe_pairs[other_id][canonical_id]
+                if existing_dupe_class > dupe_class or (existing_dupe_class == dupe_class and existing_sim > sim):
+                    return False
+            dupe_pairs[other_id][canonical_id] = (dupe_class, sim)
+
+            if dupe_class in (duplicate_status.EXACT_DUPLICATE, duplicate_status.LIKELY_DUPLICATE):
+                dupes[other_id] = max((dupe_class, sim), dupes.get(other_id, (duplicate_status.NON_DUPLICATE, 0.0)))
+                return True
+    return False
+
+
+if __name__ == '__main__':
+
+    print("----------------------------------")
+    print(":::Running openvenues/lieu deduper")
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('files', nargs='+')
+
+    parser.add_argument('--address-only',
+                        action='store_true',
+                        default=False,
+                        help='Address duplicates only')
+
+    parser.add_argument('--geocode',
+                        action='store_true',
+                        default=False,
+                        help='Geocode (dupe canonical should always have a lat/lon)')
+
+    parser.add_argument('--name-only',
+                        action="store_true",
+                        default=False,
+                        help="Name duplicates only")
+
+    parser.add_argument('--address-only-candidates',
+                        action="store_true",
+                        default=False,
+                        help='Use address-only hash keys for candidate generation, and compare all names at that address pairwise.')
+
+    parser.add_argument('--dupes-only',
+                        action='store_true',
+                        default=False,
+                        help='Only output the dupes')
+
+    parser.add_argument('--no-latlon',
+                        action='store_true',
+                        default=False,
+                        help='Do not use lat/lon or geohashing (if one data set has no lat/lons for instance)')
+
+    parser.add_argument('--use-city',
+                        action='store_true',
+                        default=False,
+                        help='Use the city name as a geo qualifier (only for local data sets)')
+
+    parser.add_argument('--use-small-containing',
+                        action='store_true',
+                        default=False,
+                        help='Use the small containing boundaries like county as a geo qualifier (only for local data sets)')
+
+    parser.add_argument('--use-postal-code',
+                        action='store_true',
+                        default=False,
+                        help='Use the postcode as a geo qualifier (only for single-country data sets or cases where postcode is unambiguous)')
+
+    parser.add_argument('--use-zip5',
+                        action='store_true',
+                        default=False,
+                        help='For U.S. data sets, cut the ZIP code at 5 digits')
+
+    parser.add_argument('--no-phone-numbers',
+                        dest='use_phone_number',
+                        action='store_false',
+                        default=True,
+                        help='Turn off comparison of normalized phone numbers as a postprocessing step (when available). Revises dupe classifications for phone number matches or definite mismatches.')
+
+    parser.add_argument('--no-fuzzy-street-names',
+                        dest='fuzzy_street_names',
+                        action='store_false',
+                        default=True,
+                        help='Do not use fuzzy street name comparison for minor misspellings, etc.  Only use libpostal expansion equality.'
+                        )
+
+    parser.add_argument('--with-unit',
+                        action='store_true',
+                        default=False,
+                        help='Include unit comparisons in deduplication (only if both addresses have unit)')
+
+    parser.add_argument('-output-dir', '-o',
+                        default='deduped',
+                        help='Output directory')
+
+    parser.add_argument('--features-db-name', '-b',
+                        default='features_db',
+                        help='Path to database to store features for lookup')
+
+    parser.add_argument('--index-type', '-y',
+                        choices=[WordIndex.TFIDF, WordIndex.INFORMATION_GAIN],
+                        default=WordIndex.INFORMATION_GAIN,
+                        help='Model to use for word relevance')
+
+    parser.add_argument('--info-gain-index', '-i',
+                        default='info_gain.index',
+                        help='Information gain index file')
+
+    parser.add_argument('--tfidf-index', '-d',
+                        default='tfidf.index',
+                        help='TF-IDF index file')
+
+    parser.add_argument('--temp-filename', '-t',
+                        default='near_dupes',
+                        help='Temporary sort file')
+
+    parser.add_argument('--output-filename', '-f',
+                        default='deduped.geojson',
+                        help='Output filename')
+
+    parser.add_argument('--name-dupe-threshold', '-n',
+                        type=float,
+                        default=DedupeResponse.default_name_dupe_threshold,
+                        help='Likely-dupe threshold between 0 and 1 for name deduping with Soft-TFIDF')
+
+    parser.add_argument('--name-review-threshold', '-r',
+                        type=float,
+                        default=DedupeResponse.default_name_review_threshold,
+                        help='Human review threshold between 0 and 1 for name deduping with Soft-TFIDF')
+
+    # args = parser.parse_args(parameter)
+    args = parser.parse_args()
+
+    address_only = args.address_only
+    name_only = args.name_only
+    geocode = args.geocode
+    with_address = not name_only
+    with_unit = args.with_unit
+    name_dupe_threshold = args.name_dupe_threshold
+    name_review_threshold = args.name_review_threshold
+    fuzzy_street_names = args.fuzzy_street_names
+
+    use_latlon = not args.no_latlon
+    use_city = args.use_city
+    use_postal_code = args.use_postal_code
+    use_zip5 = args.use_zip5
+    use_containing = args.use_small_containing
+
+    use_phone_number = args.use_phone_number
+
+    word_index_builder = None
+    word_index_filename = None
+    if not address_only:
+        if args.index_type == WordIndex.INFORMATION_GAIN:
+            word_index_builder = InformationGainBuilder()
+            word_index_filename = os.path.join(args.output_dir, args.info_gain_index)
+        elif args.index_type == WordIndex.TFIDF:
+            word_index_builder = TFIDF()
+            word_index_filename = os.path.join(args.output_dir, args.tfidf_index)
+
+    print('Word index file: {}'.format(word_index_filename))
+
+    temp_filename = os.path.join(args.output_dir, args.temp_filename)
+    map_file = open(temp_filename, 'w')
+
+    print('Near-dupe tempfile: {}'.format(temp_filename))
+
+    features_db_path = os.path.join(args.output_dir, args.features_db_name)
+    leveldb.DestroyDB(features_db_path)
+
+    print('Features DB: {}'.format(features_db_path))
+
+    features_db = leveldb.LevelDB(features_db_path)
+
+    out_path = os.path.join(args.output_dir, args.output_filename)
+    out_file = open(out_path, 'w')
+
+    print('Output filename: {}'.format(out_path))
+    print('-----------------------------')
+
+    print('* Assigning IDs, creating near-dupe hashes{}'.format(' + word index (using {})'.format(args.index_type) if not address_only else ''))
+
+    feature_id = 0
+
+    have_latlon = None
+
+    if geocode:
+        have_latlon = set()
+
+    batch = leveldb.WriteBatch()
+    for feature_id, feature in id_features(args.files):
+        DedupeResponse.add_random_guid(feature)
+        batch.Put(db_key(feature_id), json.dumps(feature))
+        if feature_id % 1000 == 0 and feature_id > 0:
+            features_db.Write(batch, sync=True)
+            batch = leveldb.WriteBatch()
+
+        address = Address.from_geojson(feature)
+        if geocode and Coordinates.LATITUDE in address and Coordinates.LONGITUDE in address:
+            have_latlon.add(six.text_type(feature_id))
+
+        try :
+            if not address_only:
+                name = address.get(AddressComponents.NAME)
+                if not name:
+                    continue
+                address_languages = NameAddressDeduper.address_languages(address)
+                word_index_builder.update(Name.content_tokens(name, languages=address_languages))
+                hashes = NameAddressDeduper.near_dupe_hashes(address, with_latlon=use_latlon, with_address=with_address, with_city_or_equivalent=use_city, with_small_containing_boundaries=use_containing, with_postal_code=use_postal_code, with_zip5=use_zip5, name_and_address_keys=with_address, name_only_keys=name_only)
+            else:
+                hashes = AddressDeduper.near_dupe_hashes(address, with_latlon=use_latlon, with_city_or_equivalent=use_city, with_small_containing_boundaries=use_containing, with_postal_code=use_postal_code, with_zip5=use_zip5)
+        except Exception  as e:
+            print(' Error reading data ')
+
+        for h in hashes:
+            map_file.write(safe_encode(u'{}\t{}\n'.format(h, feature_id)))
+
+    features_db.Write(batch, sync=True)
+
+    if geocode:
+        print('  Number of records with lat/lon: {}'.format(len(have_latlon)))
+
+    num_features = feature_id
+
+    features_db.CompactRange('\x00', '\xff')
+
+    map_file.close()
+
+    word_index = None
+
+    if not address_only:
+        word_index = word_index_builder.finalize()
+        word_index.save(word_index_filename)
+
+    print('* Sorting temporary near-dupe file by hash')
+
+    sorted_temp_filename = '{}.sorted'.format(temp_filename)
+
+    subprocess.check_call(['sort', '-t', '\t', '-T', args.output_dir, '-k1,1', '-s', temp_filename, '-o', sorted_temp_filename])
+
+    os.unlink(temp_filename)
+
+    last_key = None
+    candidate_dupes = []
+
+    print('* Checking blocks of near-dupe candidates pairwise for dupes')
+
+    dupe_pairs = defaultdict(dict)
+    dupes = {}
+
+    kvs = enumerate(itertools.groupby((safe_decode(line).rstrip().split(u'\t', 1) for line in open(sorted_temp_filename)),
+                                      key=operator.itemgetter(0)))
+
+    possible_dupe_pairs = set()
+    seen = set()
+
+    if address_only:
+        dupe_func = is_address_dupe
+        dupe_func_kw = dict(with_unit=with_unit,
+                            fuzzy_street_names=fuzzy_street_names)
+    else:
+        dupe_func = is_name_address_dupe
+        dupe_func_kw = dict(word_index=word_index,
+                            name_dupe_threshold=name_dupe_threshold,
+                            needs_review_threshold=name_review_threshold,
+                            with_address=with_address,
+                            with_unit=with_unit,
+                            use_phone_number=use_phone_number,
+                            fuzzy_street_names=fuzzy_street_names)
+
+    num_comparisons = 0
+
+    while True:
+        try:
+            i, (key, vals) = kvs.next()
+            candidate_dupes = OrderedDict.fromkeys([v for _, v in vals]).keys()
+
+            num_candidate_dupes = len(candidate_dupes)
+
+            if (i % 10000 == 0 and i > 0):
+                print('did {} hashes requiring {} pairwise comparisons'.format(i, num_comparisons))
+
+            if num_candidate_dupes > 1:
+                if not geocode:
+                    for canonical_id, other_id in itertools.combinations(candidate_dupes, 2):
+                        possible_dupe_pairs.add((min(canonical_id, other_id), max(canonical_id, other_id)))
+                        num_comparisons += 1
+                else:
+                    canonicals = [(feature_id, db_get_address(features_db, feature_id)) for feature_id in candidate_dupes if feature_id in have_latlon]
+                    others = [(feature_id, db_get_address(features_db, feature_id)) for feature_id in candidate_dupes if feature_id not in have_latlon and dupes.get(feature_id, (duplicate_status.NON_DUPLICATE, 0.0))[0] != duplicate_status.EXACT_DUPLICATE]
+                    if not canonicals or not others:
+                        continue
+
+                    for (other_id, other) in others:
+                        for (canonical_id, canonical) in canonicals:
+                            if (other_id, canonical_id) in seen:
+                                continue
+                            is_dupe = dupe_func(canonical, other, dupe_pairs, dupes, **dupe_func_kw)
+                            num_comparisons += 1
+                            seen.add((other_id, canonical_id))
+                            if is_dupe:
+                                break
+
+        except StopIteration:
+            break
+
+    if possible_dupe_pairs:
+        for j, (canonical_id, other_id) in enumerate(possible_dupe_pairs):
+            canonical_feature = json.loads(features_db.Get(db_key(canonical_id)))
+            other_feature = json.loads(features_db.Get(db_key(other_id)))
+
+            canonical = db_get_address(features_db, canonical_id)
+            other = db_get_address(features_db, other_id)
+
+            is_dupe = dupe_func(canonical, other, dupe_pairs, dupes, **dupe_func_kw)
+
+    print('  did {} pairwise comparisons out of {} possible comparisons'.format(num_comparisons, (num_features * (num_features - 1)) / 2 ))
+
+    os.unlink(sorted_temp_filename)
+
+    print('* Building output file')
+
+    if not address_only:
+        explain = DedupeResponse.explain_name_address_dupe(name_likely_dupe_threshold=name_dupe_threshold,
+                                                           name_needs_review_threshold=name_review_threshold,
+                                                           with_unit=with_unit)
+
+    else:
+        explain = DedupeResponse.explain_address_dupe(with_unit=with_unit)
+
+    if args.dupes_only:
+        for feature_id in dupe_pairs:
+            value = features_db.Get(db_key(feature_id))
+            response = dupe_response(feature_id, value, dupe_pairs, features_db, dupes)
+            out_file.write(json.dumps(response) + '\n')
+    else:
+        for feature_id, value in features_db.RangeIter():
+            feature_id = feature_id.lstrip('0')
+            response = dupe_response(feature_id, value, dupe_pairs, features_db, dupes)
+            out_file.write(json.dumps(response) + '\n')
+
+    out_file.close()
+
+    print('Finished. Got {} dupe records'.format(len(dupes)))
