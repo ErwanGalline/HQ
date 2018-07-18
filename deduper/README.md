@@ -13,7 +13,9 @@
 ##### 1. Evaluation
 
 Edit and run `evaluation_run.py` script : you have to set 2 input files (CSV) and corresponding field mapping fields (JSON).
-You can choose how many items you want to run evaluation on (dataset size) : `BIND_LIST_SIZE` 
+You can choose how many items you want to run evaluation on (dataset size) : `BIND_LIST_SIZE`.
+
+
 Edit `SIMILARITY_THRESHOLD` and `DISTANCE_THRESHOLD_METERS` thresholds to make precision and recall vary.
 
 ##### 2. Deduper 
