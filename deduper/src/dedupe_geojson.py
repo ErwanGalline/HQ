@@ -323,8 +323,9 @@ if __name__ == '__main__':
                 hashes = NameAddressDeduper.near_dupe_hashes(address, with_latlon=use_latlon, with_address=with_address, with_city_or_equivalent=use_city, with_small_containing_boundaries=use_containing, with_postal_code=use_postal_code, with_zip5=use_zip5, name_and_address_keys=with_address, name_only_keys=name_only)
             else:
                 hashes = AddressDeduper.near_dupe_hashes(address, with_latlon=use_latlon, with_city_or_equivalent=use_city, with_small_containing_boundaries=use_containing, with_postal_code=use_postal_code, with_zip5=use_zip5)
-        except Exception  as e:
-            print(' Error reading data ')
+        except Exception as e:
+            print(':::Error reading data ')
+            print(e)
 
         for h in hashes:
             map_file.write(safe_encode(u'{}\t{}\n'.format(h, feature_id)))

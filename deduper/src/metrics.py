@@ -36,21 +36,24 @@ class Metrics(object):
         it = 0
         true_pos = 0
         false_pos = 0
+        false_neg = 0
         same_as = 0
         while True:
             try:
                 feature = file.next_feature()
                 if ("same_as" in feature):
                     dupe = feature["same_as"]
-                    tp, fp = self.verifySimilarity(feature["object"], dupe)
+                    tp, fp, fn = self.verifySimilarity(feature["object"], dupe)
                     true_pos = true_pos + tp
                     false_pos = false_pos + fp
+                    false_neg = false_neg + fn
                     same_as += 1
                 if ("possibly_same_as" in feature):
                     dupe = feature["possibly_same_as"]
-                    tp, fp = self.verifySimilarity(feature["object"], dupe)
+                    tp, fp, fn = self.verifySimilarity(feature["object"], dupe)
                     true_pos = true_pos + tp
                     false_pos = false_pos + fp
+                    false_neg = false_neg + fn
                     same_as += 1
                 it += 1
             except StopIteration:
@@ -69,13 +72,14 @@ class Metrics(object):
         print(" ")
         precision = ((float(true_pos) / (float(true_pos) + float(false_pos))))
         print("Precision :" + str(precision * 100) + " %")
-        recall = ((float(true_pos) / (float(true_pos) + ((self.data_set_size) - (float(true_pos) + float(false_pos))))))
+        recall = ((float(true_pos) / (float(true_pos) + (float(false_neg)))))
         print("Recall :" + str(recall * 100) + " %")
         print("'Same as' occurrence :" + str(same_as))
 
     def verifySimilarity(self, item, dupeList):
         truePos = 0
         falsePos = 0
+        falseNeg = 0
         real_dupe_list = []
         fake_dupe_list = []
 
@@ -118,7 +122,10 @@ class Metrics(object):
                               potentialDupe['object']['properties']['name'])
                     falsePos += 1
                     fake_dupe_list.append(potentialDupe)
-        return truePos, falsePos
+            else :
+                if self.findRef(item, potentialDupe):
+                    falseNeg +=1
+        return truePos, falsePos ,falseNeg
 
     def findRef(self, item, potentialDupe):
         if potentialDupe["object"]["reference"]["bind_id"] == "":
