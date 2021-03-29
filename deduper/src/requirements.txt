@@ -105,7 +105,7 @@ pyasn1==0.4.3
 pyasn1-modules==0.2.1
 pycairo==1.16.2
 pycrypto==2.6.1
-Pygments==2.2.0
+Pygments==2.7.4
 pygobject==3.26.1
 pylint==1.8.3
 PyMySQL==0.8.1
