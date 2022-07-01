@@ -135,7 +135,7 @@ simplegeneric==0.8.1
 singledispatch==3.4.0.3
 six==1.11.0
 subprocess32==3.2.7
-supervisor==3.2.0
+supervisor==3.2.4
 tensorboard==1.8.0
 tensorboardX==1.2
 tensorflow==1.8.0
